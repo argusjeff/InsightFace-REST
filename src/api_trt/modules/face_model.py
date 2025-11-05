@@ -49,7 +49,7 @@ def serialize_face(_face_dict: dict, return_face_data: bool, return_landmarks: b
         _face_dict.pop('landmarks', None)
 
     if return_face_data:
-        _face_dict['facedata'] = base64.b64encode(cv2.imencode('.jpg', _face_dict['facedata'])[1].tostring()).decode(
+        _face_dict['facedata'] = base64.b64encode(cv2.imencode('.jpg', _face_dict['facedata'])[1].tobytes()).decode(
             'ascii')
     else:
         _face_dict.pop('facedata', None)

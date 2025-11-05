@@ -8,13 +8,24 @@ from aiohttp import ClientTimeout, TCPConnector
 from fastapi import File, Form, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import UJSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi_offline import FastAPIOffline
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 
 from api_trt.logger import logger
 from api_trt.modules.processing import Processing
-from api_trt.schemas import BodyDraw, BodyExtract
+from api_trt.schemas import BodyDraw, BodyExtract, HealthResponse, InfoResponse, ErrorResponse
 from api_trt.settings import Settings
+from api_trt.exceptions import (
+    APIError,
+    ImageProcessingError,
+    ModelInferenceError,
+    api_error_handler,
+    validation_error_handler,
+    http_exception_handler,
+    general_exception_handler
+)
 
 __version__ = os.getenv('IFR_VERSION','0.9.0.0')
 
@@ -38,6 +49,12 @@ app = FastAPIOffline(
     description="FastAPI wrapper for InsightFace API.",
     version=__version__,
 )
+
+# Register exception handlers
+app.add_exception_handler(APIError, api_error_handler)
+app.add_exception_handler(RequestValidationError, validation_error_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 
 @app.on_event('startup')
@@ -93,22 +110,19 @@ async def extract(data: BodyExtract, accept: Optional[List[str]] = Header(None))
        :return:
        List[List[dict]]
     """
-    try:
-        images = jsonable_encoder(data.images)
-        output = await processing.extract(images, max_size=data.max_size, return_face_data=data.return_face_data,
-                                          embed_only=data.embed_only, extract_embedding=data.extract_embedding,
-                                          threshold=data.threshold, extract_ga=data.extract_ga,
-                                          limit_faces=data.limit_faces, min_face_size=data.min_face_size,
-                                          return_landmarks=data.return_landmarks,
-                                          detect_masks=data.detect_masks,
-                                          verbose_timings=data.verbose_timings)
+    images = jsonable_encoder(data.images)
+    output = await processing.extract(images, max_size=data.max_size, return_face_data=data.return_face_data,
+                                      embed_only=data.embed_only, extract_embedding=data.extract_embedding,
+                                      threshold=data.threshold, extract_ga=data.extract_ga,
+                                      limit_faces=data.limit_faces, min_face_size=data.min_face_size,
+                                      return_landmarks=data.return_landmarks,
+                                      detect_masks=data.detect_masks,
+                                      verbose_timings=data.verbose_timings)
 
-        if data.msgpack or 'application/x-msgpack' in accept:
-            return PlainTextResponse(msgpack.dumps(output, use_single_float=True), media_type='application/x-msgpack')
-        else:
-            return UJSONResponse(output)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if data.msgpack or 'application/x-msgpack' in accept:
+        return PlainTextResponse(msgpack.dumps(output, use_single_float=True), media_type='application/x-msgpack')
+    else:
+        return UJSONResponse(output)
 
 
 @app.post('/draw_detections', tags=['Detection & recognition'])
@@ -124,17 +138,14 @@ async def draw(data: BodyDraw):
        - **limit_faces**: Maximum number of faces to be processed.  0 for unlimited number. Default: 0 (*optional*)
        \f
     """
-    try:
-        images = jsonable_encoder(data.images)
-        output = await processing.draw(images, threshold=data.threshold,
-                                       draw_landmarks=data.draw_landmarks, draw_scores=data.draw_scores,
-                                       limit_faces=data.limit_faces, min_face_size=data.min_face_size,
-                                       draw_sizes=data.draw_sizes,
-                                       detect_masks=data.detect_masks)
-        output.seek(0)
-        return StreamingResponse(output, media_type="image/png")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    images = jsonable_encoder(data.images)
+    output = await processing.draw(images, threshold=data.threshold,
+                                   draw_landmarks=data.draw_landmarks, draw_scores=data.draw_scores,
+                                   limit_faces=data.limit_faces, min_face_size=data.min_face_size,
+                                   draw_sizes=data.draw_sizes,
+                                   detect_masks=data.detect_masks)
+    output.seek(0)
+    return StreamingResponse(output, media_type="image/png")
 
 
 @app.post('/multipart/draw_detections', tags=['Detection & recognition'])
@@ -151,38 +162,48 @@ async def draw_upl(file: bytes = File(...), threshold: float = Form(0.6), draw_l
        - **limit_faces**: Maximum number of faces to be processed.  0 for unlimited number. Default: 0 (*optional*)
        \f
     """
-    try:
-        output = await processing.draw(file, threshold=threshold,
-                                       draw_landmarks=draw_landmarks, draw_scores=draw_scores, draw_sizes=draw_sizes,
-                                       limit_faces=limit_faces,
-                                       multipart=True)
-        output.seek(0)
-        return StreamingResponse(output, media_type='image/jpg')
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    output = await processing.draw(file, threshold=threshold,
+                                   draw_landmarks=draw_landmarks, draw_scores=draw_scores, draw_sizes=draw_sizes,
+                                   limit_faces=limit_faces,
+                                   multipart=True)
+    output.seek(0)
+    return StreamingResponse(output, media_type='image/jpg')
 
 
-@app.get('/info', tags=['Utility'])
+@app.get('/health', tags=['Utility'], response_model=HealthResponse,
+         responses={503: {"model": ErrorResponse, "description": "Service not ready"}})
+def health():
+    """
+    Health check endpoint for load balancers and monitoring systems.
+    Returns a simple status if the service is up and processing module is initialized.
+    """
+    if processing is None:
+        raise HTTPException(status_code=503, detail="Service not ready - processing module not initialized")
+
+    return {
+        "status": "healthy",
+        "version": __version__
+    }
+
+
+@app.get('/info', tags=['Utility'], response_model=InfoResponse)
 def info():
     """
-    Enlist container configuration.
-
+    Enlist container configuration and model information.
+    Returns details about the current API version, loaded models, and default settings.
     """
-    try:
-        about = dict(
-            version=__version__,
-            tensorrt_version=os.getenv('TRT_VERSION', os.getenv('TENSORRT_VERSION')),
-            log_level=settings.log_level,
-            models=settings.models.dict(),
-            defaults=settings.defaults.dict(),
-        )
-        about['models'].pop('ga_ignore', None)
-        about['models'].pop('rec_ignore', None)
-        about['models'].pop('mask_ignore', None)
-        about['models'].pop('device', None)
-        return about
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    about = dict(
+        version=__version__,
+        tensorrt_version=os.getenv('TRT_VERSION', os.getenv('TENSORRT_VERSION')),
+        log_level=settings.log_level,
+        models=settings.models.dict(),
+        defaults=settings.defaults.dict(),
+    )
+    about['models'].pop('ga_ignore', None)
+    about['models'].pop('rec_ignore', None)
+    about['models'].pop('mask_ignore', None)
+    about['models'].pop('device', None)
+    return about
 
 
 @app.get('/', include_in_schema=False)

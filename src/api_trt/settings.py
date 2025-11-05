@@ -1,5 +1,9 @@
 from typing import Union, Optional, List
 
+# Note: Using Pydantic v1 compatibility layer for environment settings
+# For full Pydantic v2 migration, consider using pydantic-settings package:
+#   from pydantic_settings import BaseSettings
+# Current approach maintains backward compatibility
 from pydantic.v1.env_settings import BaseSettings
 from pydantic.v1.validators import str_validator
 

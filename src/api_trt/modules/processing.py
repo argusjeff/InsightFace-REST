@@ -185,7 +185,7 @@ class Processing:
             images = await get_images(images, session=self.dl_client)
             image = images[0].get('data')
         else:
-            __bin = np.fromstring(images, np.uint8)
+            __bin = np.frombuffer(images, np.uint8)
             image = cv2.imdecode(__bin, cv2.IMREAD_COLOR)
 
         faces = await self.model.get([image],
